@@ -86,7 +86,7 @@ func makeSubnetIDForNetwork(networkName, address string, mask int) (string, stri
 // spaces. The returned error satisfies errors.IsNotSupported(),
 // unless a general API failure occurs.
 func (e *environ) SupportsSpaces(context.ProviderCallContext) (bool, error) {
-	return false, nil
+	return true, nil
 }
 
 // NetworkInterfaces returns a slice with the network interfaces that

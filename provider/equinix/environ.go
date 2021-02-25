@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/davecgh/go-spew/spew"
 	"github.com/juju/clock"
 	"github.com/juju/errors"
 	"github.com/juju/juju/cloudconfig/instancecfg"
@@ -166,7 +167,7 @@ func (e *environ) ControllerInstances(ctx context.ProviderCallContext, controlle
 	for _, i := range insts {
 		instanceIDs = append(instanceIDs, i.Id())
 	}
-	return nil, nil
+	return instanceIDs, nil
 }
 
 func (e *environ) Create(ctx context.ProviderCallContext, args environs.CreateParams) error {
@@ -350,6 +351,23 @@ func (e *environ) StartInstance(ctx context.ProviderCallContext, args environs.S
 		Tags:         packetTags,
 	}
 
+	logger.Infof("-------> SubnetToZone %s", spew.Sdump(args.SubnetsToZones))
+
+	networkIDs, err := e.getSubnetsToZoneMap(ctx, args)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+
+	if len(networkIDs) > 0 {
+		logger.Infof("---------> THERE are some network IDs %v", networkIDs)
+		device.IPAddresses = []packngo.IPAddressCreateRequest{
+			{
+				Reservations: networkIDs,
+			},
+		}
+	}
+	logger.Infof("---------> THERE are some network IDs %v", networkIDs)
+
 	d, _, err := e.equnixClient.Devices.Create(device)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -383,6 +401,45 @@ func (e *environ) StartInstance(ctx context.ProviderCallContext, args environs.S
 		Instance: inst,
 		Hardware: hc,
 	}, nil
+}
+
+func (e *environ) getSubnetsToZoneMap(ctx context.ProviderCallContext, args environs.StartInstanceParams) ([]string, error) {
+	logger.Info("---------> getSubnetsToZoneMap <---------")
+
+	spaceCons := args.Constraints.Spaces
+	logger.Infof("---------> Constraints %s <---------", spew.Sdump(args.Constraints))
+	logger.Infof("---------> spaceCons %s <---------", spew.Sdump(spaceCons))
+
+	networkIDs := []string{}
+	if spaceCons != nil {
+		logger.Infof("---------> LOOPING <----------")
+
+		// instances, err := e.ControllerInstances(ctx, args.ControllerUUID)
+		// if err != nil {
+		// 	return nil, errors.Trace(err)
+		// }
+		// logger.Infof("---------> Instances %s<----------", spew.Sdump(instances))
+
+		for _, space := range *spaceCons {
+			logger.Infof("---------> Instances %s<----------", spew.Sdump(spaceCons))
+			// for _, inst := range instances {
+			subnets, err := e.Subnets(ctx, instance.UnknownId, nil)
+			logger.Infof("---------> subnets %s <----------", spew.Sdump(subnets))
+			if err != nil {
+				return nil, errors.Trace(err)
+			}
+
+			for _, subnet := range subnets {
+				if subnet.SpaceName == space {
+					networkIDs = append(networkIDs, subnet.ProviderNetworkId.String())
+				}
+			}
+			// }
+		}
+	}
+	logger.Infof("---------> THE END <----------")
+
+	return networkIDs, nil
 }
 
 // supportedInstanceTypes returns the instance types supported by Equnix Metal.
