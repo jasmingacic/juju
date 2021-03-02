@@ -22,7 +22,6 @@ var _ environs.Networking = (*environ)(nil)
 // Subnets returns basic information about subnets known by the provider for
 // the environment.
 func (e *environ) Subnets(ctx context.ProviderCallContext, inst instance.Id, subnetIDs []network.Id) ([]network.SubnetInfo, error) {
-
 	projectID := e.cloud.Credential.Attributes()["project-id"]
 	ips, _, err := e.equnixClient.ProjectIPs.List(projectID, nil)
 	if err != nil {
@@ -36,9 +35,8 @@ func (e *environ) Subnets(ctx context.ProviderCallContext, inst instance.Id, sub
 			return nil, errors.Trace(err)
 		}
 
-		var az = "packet"
-		if ipblock.Facility != nil && ipblock.Facility.Name != "" {
-			az = ipblock.Facility.Code
+		if ipblock.Facility == nil || ipblock.Facility.Code != e.cloud.Region {
+			continue
 		}
 
 		subnet := network.SubnetInfo{
@@ -46,7 +44,7 @@ func (e *environ) Subnets(ctx context.ProviderCallContext, inst instance.Id, sub
 			ProviderNetworkId: network.Id(ipblock.ID), //TODO: figure out what the network ID should be???
 			CIDR:              cidr,
 			VLANTag:           0,
-			AvailabilityZones: []string{az},
+			AvailabilityZones: []string{ipblock.Facility.Code},
 		}
 		projectSubnets = append(projectSubnets, subnet)
 	}

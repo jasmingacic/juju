@@ -349,7 +349,13 @@ func (e *environ) StartInstance(ctx context.ProviderCallContext, args environs.S
 		BillingCycle: "hourly",
 		UserData:     userdata,
 		Tags:         packetTags,
-		IPAddresses:  []packngo.IPAddressCreateRequest{},
+		IPAddresses: []packngo.IPAddressCreateRequest{
+			{
+				Public:        false,
+				AddressFamily: 4,
+				CIDR:          31,
+			},
+		},
 	}
 
 	logger.Infof("-------> SubnetToZone %s", spew.Sdump(args.SubnetsToZones))
@@ -367,12 +373,14 @@ func (e *environ) StartInstance(ctx context.ProviderCallContext, args environs.S
 			if err != nil {
 				return nil, errors.Trace(err)
 			}
-
-			device.IPAddresses = append(device.IPAddresses, packngo.IPAddressCreateRequest{
+			ipblock := packngo.IPAddressCreateRequest{
 				AddressFamily: net.AddressFamily,
 				Public:        net.Public,
+				CIDR:          31,
 				Reservations:  []string{net.ID},
-			})
+			}
+
+			device.IPAddresses = append(device.IPAddresses, ipblock)
 		}
 	}
 	logger.Infof("---------> device.IPAddresses %v", device.IPAddresses)
