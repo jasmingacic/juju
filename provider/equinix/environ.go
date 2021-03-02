@@ -349,6 +349,7 @@ func (e *environ) StartInstance(ctx context.ProviderCallContext, args environs.S
 		BillingCycle: "hourly",
 		UserData:     userdata,
 		Tags:         packetTags,
+		IPAddresses:  []packngo.IPAddressCreateRequest{},
 	}
 
 	logger.Infof("-------> SubnetToZone %s", spew.Sdump(args.SubnetsToZones))
@@ -360,16 +361,27 @@ func (e *environ) StartInstance(ctx context.ProviderCallContext, args environs.S
 
 	if len(networkIDs) > 0 {
 		logger.Infof("---------> THERE are some network IDs %v", networkIDs)
-		device.IPAddresses = []packngo.IPAddressCreateRequest{
-			{
-				Reservations: networkIDs,
-			},
+
+		for _, netid := range networkIDs {
+			net, _, err := e.equnixClient.ProjectIPs.Get(netid, &packngo.GetOptions{})
+			if err != nil {
+				return nil, errors.Trace(err)
+			}
+
+			device.IPAddresses = append(device.IPAddresses, packngo.IPAddressCreateRequest{
+				AddressFamily: net.AddressFamily,
+				Public:        net.Public,
+				Reservations:  []string{net.ID},
+			})
 		}
 	}
-	logger.Infof("---------> THERE are some network IDs %v", networkIDs)
+	logger.Infof("---------> device.IPAddresses %v", device.IPAddresses)
 
 	d, _, err := e.equnixClient.Devices.Create(device)
+	logger.Infof("---------> device.error %v", err)
+
 	if err != nil {
+
 		return nil, errors.Trace(err)
 	}
 
@@ -405,39 +417,18 @@ func (e *environ) StartInstance(ctx context.ProviderCallContext, args environs.S
 
 func (e *environ) getSubnetsToZoneMap(ctx context.ProviderCallContext, args environs.StartInstanceParams) ([]string, error) {
 	logger.Info("---------> getSubnetsToZoneMap <---------")
-
-	spaceCons := args.Constraints.Spaces
-	logger.Infof("---------> Constraints %s <---------", spew.Sdump(args.Constraints))
-	logger.Infof("---------> spaceCons %s <---------", spew.Sdump(spaceCons))
-
 	networkIDs := []string{}
-	if spaceCons != nil {
-		logger.Infof("---------> LOOPING <----------")
+	subnetsToZones := args.SubnetsToZones
+	if args.Constraints.Spaces != nil {
 
-		// instances, err := e.ControllerInstances(ctx, args.ControllerUUID)
-		// if err != nil {
-		// 	return nil, errors.Trace(err)
-		// }
-		// logger.Infof("---------> Instances %s<----------", spew.Sdump(instances))
-
-		for _, space := range *spaceCons {
-			logger.Infof("---------> Instances %s<----------", spew.Sdump(spaceCons))
-			// for _, inst := range instances {
-			subnets, err := e.Subnets(ctx, instance.UnknownId, nil)
-			logger.Infof("---------> subnets %s <----------", spew.Sdump(subnets))
-			if err != nil {
-				return nil, errors.Trace(err)
+		for _, sz := range subnetsToZones {
+			for id, _ := range sz {
+				networkIDs = append(networkIDs, strings.TrimPrefix(id.String(), "subnet-"))
 			}
-
-			for _, subnet := range subnets {
-				if subnet.SpaceName == space {
-					networkIDs = append(networkIDs, subnet.ProviderNetworkId.String())
-				}
-			}
-			// }
 		}
 	}
-	logger.Infof("---------> THE END <----------")
+
+	logger.Infof("---------> networkIDs %v <----------", networkIDs)
 
 	return networkIDs, nil
 }

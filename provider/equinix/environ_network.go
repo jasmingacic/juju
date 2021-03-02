@@ -10,8 +10,10 @@ import (
 	"github.com/juju/errors"
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/network"
+	corenetwork "github.com/juju/juju/core/network"
 	"github.com/juju/juju/environs"
 	"github.com/juju/juju/environs/context"
+	"github.com/juju/juju/environs/instances"
 	"github.com/juju/names/v4"
 )
 
@@ -34,11 +36,17 @@ func (e *environ) Subnets(ctx context.ProviderCallContext, inst instance.Id, sub
 			return nil, errors.Trace(err)
 		}
 
+		var az = "packet"
+		if ipblock.Facility != nil && ipblock.Facility.Name != "" {
+			az = ipblock.Facility.Code
+		}
+
 		subnet := network.SubnetInfo{
 			ProviderId:        network.Id(subnetID),
 			ProviderNetworkId: network.Id(ipblock.ID), //TODO: figure out what the network ID should be???
 			CIDR:              cidr,
 			VLANTag:           0,
+			AvailabilityZones: []string{az},
 		}
 		projectSubnets = append(projectSubnets, subnet)
 	}
@@ -78,7 +86,7 @@ func makeSubnetIDForNetwork(networkName, address string, mask int) (string, stri
 	}
 
 	cidr := netCIDR.String()
-	subnetID := fmt.Sprintf("subnet-%s-%s", networkName, cidr)
+	subnetID := fmt.Sprintf("subnet-%s", networkName)
 	return subnetID, cidr, nil
 }
 
@@ -95,8 +103,47 @@ func (e *environ) SupportsSpaces(context.ProviderCallContext) (bool, error) {
 // the instances were found, the returned slice will have some nil slots, and
 // an ErrPartialInstances error will be returned.
 func (e *environ) NetworkInterfaces(ctx context.ProviderCallContext, ids []instance.Id) ([]network.InterfaceInfos, error) {
+	if len(ids) == 0 {
+		return nil, environs.ErrNoInstances
+	}
+	insts, err := e.Instances(ctx, ids)
+	if err != nil {
+		return nil, errors.Trace(err)
 
-	return nil, nil
+	}
+	infos := make([]network.InterfaceInfos, len(ids))
+	for i, id := range ids {
+		var dev instances.Instance
+		for _, inst := range insts {
+			if id == inst.Id() {
+				dev = inst
+				break
+			}
+		}
+		subnets, err := e.Subnets(ctx, id, nil)
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+		for _, subnet := range subnets {
+			deviceAddresses, err := dev.Addresses(ctx)
+			if err != nil {
+				return nil, errors.Trace(err)
+			}
+			infos[i] = append(infos[i], network.InterfaceInfo{
+				DeviceIndex:       i,
+				ProviderId:        subnet.ProviderNetworkId,
+				ProviderSubnetId:  subnet.ID,
+				AvailabilityZones: subnet.AvailabilityZones,
+				InterfaceType:     corenetwork.EthernetInterface,
+				Addresses:         deviceAddresses,
+				Disabled:          false,
+				NoAutoStart:       false,
+				ConfigType:        corenetwork.ConfigDHCP,
+				Origin:            corenetwork.OriginProvider,
+			})
+		}
+	}
+	return infos, nil
 }
 
 // SuperSubnets returns information about aggregated subnet.
