@@ -6,7 +6,6 @@ package equinix
 import (
 	"fmt"
 	"net/http"
-	"os"
 
 	"github.com/juju/errors"
 	"github.com/juju/jsonschema"
@@ -44,7 +43,6 @@ func (p environProvider) PrepareConfig(args environs.PrepareConfigParams) (*conf
 func validateCloudSpec(spec environscloudspec.CloudSpec) error {
 	credentialAttrs := spec.Credential.Attributes()
 	httpClient := http.DefaultClient
-	os.Setenv("PACKNGO_DEBUG", "1")
 
 	projectID := credentialAttrs["project-id"]
 	apiToken := credentialAttrs["api-token"]
