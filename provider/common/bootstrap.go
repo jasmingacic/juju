@@ -316,16 +316,7 @@ func BootstrapInstance(
 			return err
 		}
 		maybeSetBridge(icfg)
-
-		var hostSSHOptions HostSSHOptionsFunc
-		if args.BootstrapSSHOptions != nil {
-			hostSSHOptions = HostSSHOptionsFunc(args.BootstrapSSHOptions(icfg))
-		} else {
-			hostSSHOptions = func(host string) (*ssh.Options, func(), error) {
-				return BootstrapSSHOptionsFunc(host, instanceConfig)
-			}
-		}
-		return FinishBootstrap(ctx, client, hostSSHOptions, env, callCtx, result.Instance, icfg, opts)
+		return FinishBootstrap(ctx, client, env, callCtx, result.Instance, icfg, opts)
 	}
 	return result, selectedSeries, finalizer, nil
 }
@@ -393,7 +384,6 @@ func formatMemory(m uint64) string {
 var FinishBootstrap = func(
 	ctx environs.BootstrapContext,
 	client ssh.Client,
-	hostSSHOptions HostSSHOptionsFunc,
 	env environs.Environ,
 	callCtx envcontext.ProviderCallContext,
 	inst instances.Instance,
@@ -404,6 +394,7 @@ var FinishBootstrap = func(
 	ctx.InterruptNotify(interrupted)
 	defer ctx.StopInterruptNotify(interrupted)
 
+	hostSSHOptions := bootstrapSSHOptionsFunc(instanceConfig)
 	addr, err := WaitSSH(
 		ctx.Context(),
 		ctx.GetStderr(),
@@ -509,9 +500,18 @@ func DefaultHostSSHOptions(host string) (*ssh.Options, func(), error) {
 	return nil, func() {}, nil
 }
 
-// BootstrapSSHOptionsFunc that takes a bootstrap machine's InstanceConfig
+// bootstrapSSHOptionsFunc that takes a bootstrap machine's InstanceConfig
 // and returns a HostSSHOptionsFunc.
-func BootstrapSSHOptionsFunc(host string, instanceConfig *instancecfg.InstanceConfig) (_ *ssh.Options, cleanup func(), err error) {
+func bootstrapSSHOptionsFunc(instanceConfig *instancecfg.InstanceConfig) HostSSHOptionsFunc {
+	return func(host string) (*ssh.Options, func(), error) {
+		return hostBootstrapSSHOptions(host, instanceConfig)
+	}
+}
+
+func hostBootstrapSSHOptions(
+	host string,
+	instanceConfig *instancecfg.InstanceConfig,
+) (_ *ssh.Options, cleanup func(), err error) {
 	cleanup = func() {}
 	defer func() {
 		if err != nil {
