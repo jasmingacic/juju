@@ -10,9 +10,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/davecgh/go-spew/spew"
 	"github.com/juju/clock"
 	"github.com/juju/errors"
+	"github.com/juju/juju/cloudconfig/cloudinit"
 	"github.com/juju/juju/cloudconfig/instancecfg"
 	"github.com/juju/juju/cloudconfig/providerinit"
 	"github.com/juju/juju/core/constraints"
@@ -50,29 +50,6 @@ type environ struct {
 	cloud        environscloudspec.CloudSpec
 	equnixClient *packngo.Client
 }
-
-const (
-	equnixUserDataOverrides = `#!/bin/bash
-rm /etc/ssh/ssh_host_*dsa*
-rm /etc/ssh/ssh_host_ed*
-rm /sbin/initctl
-sudo apt update
-sudo apt install -y dmidecode snapd
-set -e
-(grep ubuntu /etc/group) || groupadd ubuntu
-(id ubuntu &> /dev/null) || useradd -m ubuntu -s /bin/bash -g ubuntu
-umask 0077
-temp=$(mktemp)
-echo 'ubuntu ALL=(ALL) NOPASSWD:ALL' > $temp
-install -m 0440 $temp /etc/sudoers.d/90-juju-ubuntu
-rm $temp
-su ubuntu -c 'install -D -m 0600 /dev/null ~/.ssh/authorized_keys'
-export authorized_keys="%s"
-if [ ! -z "$authorized_keys" ]; then
-su ubuntu -c 'printf "$authorized_keys" >> ~/.ssh/authorized_keys'
-fi
-`
-)
 
 var providerInstance environProvider
 
@@ -325,17 +302,33 @@ func (e *environ) StartInstance(ctx context.ProviderCallContext, args environs.S
 		return nil, errors.Trace(err)
 	}
 
-	juserdata, err := providerinit.ComposeUserData(args.InstanceConfig, nil, EquinixRenderer{})
-
-	userdata := strings.Join(
-		[]string{
-			fmt.Sprintf(equnixUserDataOverrides, e.ecfg.config.AuthorizedKeys()),
-			strings.ReplaceAll(string(juserdata), "#!/bin/bash", ""),
-		}, "\n",
+	cloudCfg, err := cloudinit.New(args.InstanceConfig.Series)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	cloudCfg.AddScripts(
+		// This is a dummy script injected into packet images that
+		// confuses the init system detection logic used by juju.
+		"rm -f /sbin/initctl",
 	)
 
-	packetTags := []string{}
+	// Install additional dependencies that are present in ubuntu images
+	// but not in the versions built by equinix.
+	//
+	// NOTE(achilleasa): this is a hack and is only meant to be used
+	// temporarily; we must ensure that equinix mirrors the official
+	// ubuntu cloud images.
+	if _, err := series.UbuntuSeriesVersion(args.InstanceConfig.Series); err == nil {
+		cloudCfg.AddScripts(
+			"apt-get update",
+			"DEBIAN_FRONTEND=noninteractive apt-get --option=Dpkg::Options::=--force-confdef --option=Dpkg::Options::=--force-confold --option=Dpkg::Options::=--force-unsafe-io --assume-yes --quiet install dmidecode snapd lxd",
+		)
+	}
 
+	userdata, err := providerinit.ComposeUserData(args.InstanceConfig, cloudCfg, EquinixRenderer{})
+
+	// Render the required tags for the instance.
+	packetTags := []string{}
 	for k, v := range args.InstanceConfig.Tags {
 		packetTags = append(packetTags, fmt.Sprintf("%s=%s", k, v))
 	}
@@ -347,44 +340,64 @@ func (e *environ) StartInstance(ctx context.ProviderCallContext, args environs.S
 		OS:           spec.Image.Id,
 		ProjectID:    e.cloud.Credential.Attributes()["project-id"],
 		BillingCycle: "hourly",
-		UserData:     userdata,
+		UserData:     string(userdata),
 		Tags:         packetTags,
-		IPAddresses: []packngo.IPAddressCreateRequest{
-			{
-				Public:        false,
-				AddressFamily: 4,
-				CIDR:          31,
-			},
-		},
 	}
 
-	logger.Infof("-------> SubnetToZone %s", spew.Sdump(args.SubnetsToZones))
-
-	networkIDs, err := e.getSubnetsToZoneMap(ctx, args)
+	subnetIDs, err := e.getSubnetsToZoneMap(ctx, args)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 
-	if len(networkIDs) > 0 {
-		logger.Infof("---------> THERE are some network IDs %v", networkIDs)
-
-		for _, netid := range networkIDs {
-			net, _, err := e.equnixClient.ProjectIPs.Get(netid, &packngo.GetOptions{})
+	var requestedPublicAddr, requestedPrivateAddr bool
+	if len(subnetIDs) != 0 {
+		logger.Debugf("requesting a machine with address in subnet(s): %v", subnetIDs)
+		for _, subnetID := range subnetIDs {
+			net, _, err := e.equnixClient.ProjectIPs.Get(subnetID, &packngo.GetOptions{})
 			if err != nil {
 				return nil, errors.Trace(err)
 			}
-			ipblock := packngo.IPAddressCreateRequest{
-				AddressFamily: net.AddressFamily,
-				Public:        net.Public,
-				CIDR:          31,
-				Reservations:  []string{net.ID},
+
+			requestedPublicAddr = requestedPublicAddr || net.Public
+			requestedPrivateAddr = requestedPrivateAddr || !net.Public
+
+			// Packet requires us to request at least a /31 for IPV4
+			// addresses and a /127 for IPV6 ones.
+			cidrSize := 31
+			if net.AddressFamily != 4 {
+				cidrSize = 127
 			}
 
-			device.IPAddresses = append(device.IPAddresses, ipblock)
+			ipBlock := packngo.IPAddressCreateRequest{
+				AddressFamily: net.AddressFamily,
+				Public:        net.Public,
+				CIDR:          cidrSize,
+				Reservations:  []string{net.ID},
+			}
+			device.IPAddresses = append(device.IPAddresses, ipBlock)
 		}
 	}
-	logger.Infof("---------> device.IPAddresses %v", device.IPAddresses)
 
+	// In order to spin up a new device, we must specify at least one
+	// public and one private address.
+	if !requestedPrivateAddr {
+		// Allocate a private address from the default address pool.
+		device.IPAddresses = append(device.IPAddresses, packngo.IPAddressCreateRequest{
+			Public:        false,
+			AddressFamily: 4,
+			CIDR:          31,
+		})
+	}
+	if !requestedPublicAddr {
+		// Allocate a public address from the default address pool.
+		device.IPAddresses = append(device.IPAddresses, packngo.IPAddressCreateRequest{
+			Public:        true,
+			AddressFamily: 4,
+			CIDR:          31,
+		})
+	}
+
+	logger.Infof("---------> device.IPAddresses %v", device.IPAddresses)
 	d, _, err := e.equnixClient.Devices.Create(device)
 	logger.Infof("---------> device.error %v", err)
 
@@ -405,40 +418,32 @@ func (e *environ) StartInstance(ctx context.ProviderCallContext, args environs.S
 		return nil, errors.Trace(err)
 	}
 
-	var cpus uint64
-	if len(inst.Plan.Specs.Cpus) > 0 {
+	var cpus uint64 = 1
+	if inst.Plan != nil && inst.Plan.Specs != nil && len(inst.Plan.Specs.Cpus) > 0 {
 		cpus = uint64(inst.Plan.Specs.Cpus[0].Count)
-	}
-
-	hc := &instance.HardwareCharacteristics{
-		Arch: &amd64,
-		Mem:  &mem,
-		// RootDisk: &instanceSpec.InstanceType.RootDisk,
-		CpuCores: &cpus,
 	}
 
 	return &environs.StartInstanceResult{
 		Instance: inst,
-		Hardware: hc,
+		Hardware: &instance.HardwareCharacteristics{
+			Arch: &amd64,
+			Mem:  &mem,
+			// RootDisk: &instanceSpec.InstanceType.RootDisk,
+			CpuCores: &cpus,
+		},
 	}, nil
 }
 
 func (e *environ) getSubnetsToZoneMap(ctx context.ProviderCallContext, args environs.StartInstanceParams) ([]string, error) {
-	logger.Info("---------> getSubnetsToZoneMap <---------")
-	networkIDs := []string{}
-	subnetsToZones := args.SubnetsToZones
-	if args.Constraints.Spaces != nil {
-
-		for _, sz := range subnetsToZones {
-			for id, _ := range sz {
-				networkIDs = append(networkIDs, strings.TrimPrefix(id.String(), "subnet-"))
-			}
+	var subnetIDs []string
+	for _, subnetList := range args.SubnetsToZones {
+		for subnetID := range subnetList {
+			packetSubnetID := strings.TrimPrefix(subnetID.String(), "subnet-")
+			subnetIDs = append(subnetIDs, packetSubnetID)
 		}
 	}
 
-	logger.Infof("---------> networkIDs %v <----------", networkIDs)
-
-	return networkIDs, nil
+	return subnetIDs, nil
 }
 
 // supportedInstanceTypes returns the instance types supported by Equnix Metal.

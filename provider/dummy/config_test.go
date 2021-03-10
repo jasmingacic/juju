@@ -18,10 +18,9 @@ import (
 )
 
 var _ = gc.Suite(&ConfigSuite{})
-
-type ConfigSuite struct {
-	testing.BaseSuite
-}
+import (
+	jc "github.com/juju/testing/checkers"
+	gc "gopkg.in/check.v1"
 
 func (s *ConfigSuite) TearDownTest(c *gc.C) {
 	s.BaseSuite.TearDownTest(c)
